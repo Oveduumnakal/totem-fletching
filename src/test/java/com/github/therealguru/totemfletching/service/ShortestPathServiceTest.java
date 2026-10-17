@@ -23,9 +23,13 @@ public class ShortestPathServiceTest {
     private static final WorldPoint SITE_8_TILE = TotemSite.SITE_8.getLocation();
     private static final WorldPoint OUTSIDE = new WorldPoint(3200, 3200, 0);
     private static final WorldPoint SITE_7_TILE = TotemSite.SITE_7.getLocation();
-    private static final WorldPoint FLOWER_1 = new WorldPoint(1450, 3340, 0);
-    private static final WorldPoint FLOWER_2 = new WorldPoint(1455, 3340, 0);
-    private static final WorldPoint FAR_FLOWER = new WorldPoint(1465, 3340, 0);
+    private static final WorldPoint WEST_OF_SITE_7 = new WorldPoint(1435, 3338, 0);
+    private static final WorldPoint FLOWER_1 = new WorldPoint(1441, 3342, 0);
+    private static final WorldPoint FLOWER_2 = new WorldPoint(1446, 3343, 0);
+    private static final WorldPoint FAR_PARTNER = new WorldPoint(1454, 3342, 0);
+    private static final WorldPoint OFF_PATH_PARTNER = new WorldPoint(1441, 3353, 0);
+    private static final WorldPoint OFF_PATH_FLOWER = new WorldPoint(1441, 3362, 0);
+    private static final int DETOUR = 10;
 
     private final TestConfig config = new TestConfig();
     private final EventBus eventBus = new EventBus();
@@ -37,6 +41,7 @@ public class ShortestPathServiceTest {
     public static class TestConfig implements TotemFletchingConfig {
         private boolean shortestPath = true;
         private boolean entTrails = false;
+        private int detour = DETOUR;
 
         @Override
         public boolean useShortestPath() {
@@ -46,6 +51,11 @@ public class ShortestPathServiceTest {
         @Override
         public boolean routeViaEntTrails() {
             return entTrails;
+        }
+
+        @Override
+        public int trailDetourLimit() {
+            return detour;
         }
     }
 
@@ -196,15 +206,20 @@ public class ShortestPathServiceTest {
         return (WorldPoint) messages.received.get(index).getData().get("target");
     }
 
+    private List<WorldPoint> route(List<WorldPoint> trails, int maxDetour) {
+        return ShortestPathService.selectRoute(
+                WEST_OF_SITE_7, totemService.getTotems(), trails, maxDetour);
+    }
+
     @Test
     public void selectTrailPairIsEmptyWithoutFlowers() {
-        assertTrue(ShortestPathService.selectTrailPair(SITE_8_TILE, List.of()).isEmpty());
+        assertTrue(ShortestPathService.selectTrailPair(WEST_OF_SITE_7, List.of()).isEmpty());
     }
 
     @Test
     public void selectTrailPairVisitsNearestFlowerThenItsPartner() {
         List<WorldPoint> pair =
-                ShortestPathService.selectTrailPair(SITE_8_TILE, List.of(FLOWER_2, FLOWER_1));
+                ShortestPathService.selectTrailPair(WEST_OF_SITE_7, List.of(FLOWER_2, FLOWER_1));
 
         assertEquals(List.of(FLOWER_1, FLOWER_2), pair);
     }
@@ -212,7 +227,7 @@ public class ShortestPathServiceTest {
     @Test
     public void selectTrailPairIgnoresFlowersTooFarToBePartners() {
         List<WorldPoint> pair =
-                ShortestPathService.selectTrailPair(SITE_8_TILE, List.of(FLOWER_1, FAR_FLOWER));
+                ShortestPathService.selectTrailPair(WEST_OF_SITE_7, List.of(FLOWER_1, FAR_PARTNER));
 
         assertEquals(List.of(FLOWER_1), pair);
     }
@@ -220,35 +235,42 @@ public class ShortestPathServiceTest {
     @Test
     public void selectTrailPairTreatsFlowersOnTheSameTileAsOne() {
         List<WorldPoint> pair =
-                ShortestPathService.selectTrailPair(SITE_8_TILE, List.of(FLOWER_1, FLOWER_1));
+                ShortestPathService.selectTrailPair(WEST_OF_SITE_7, List.of(FLOWER_1, FLOWER_1));
 
         assertEquals(List.of(FLOWER_1), pair);
     }
 
     @Test
     public void selectRouteWithoutFlowersIsJustTheNearestTotem() {
-        List<WorldPoint> route =
-                ShortestPathService.selectRoute(SITE_8_TILE, totemService.getTotems(), List.of());
-
-        assertEquals(List.of(SITE_8_TILE), route);
+        assertEquals(List.of(SITE_7_TILE), route(List.of(), DETOUR));
     }
 
     @Test
-    public void selectRouteEndsAtTheTotemNearestTheLastFlower() {
-        List<WorldPoint> route =
-                ShortestPathService.selectRoute(
-                        SITE_8_TILE, totemService.getTotems(), List.of(FLOWER_1, FLOWER_2));
-
-        assertEquals(List.of(FLOWER_1, FLOWER_2, SITE_7_TILE), route);
+    public void selectRouteVisitsTheFlowersThenTheNextTotem() {
+        assertEquals(
+                List.of(FLOWER_1, FLOWER_2, SITE_7_TILE),
+                route(List.of(FLOWER_1, FLOWER_2), DETOUR));
     }
 
     @Test
     public void selectRouteWithALoneFlowerVisitsItThenTheTotem() {
-        List<WorldPoint> route =
-                ShortestPathService.selectRoute(
-                        SITE_8_TILE, totemService.getTotems(), List.of(FLOWER_1));
+        assertEquals(List.of(FLOWER_1, SITE_7_TILE), route(List.of(FLOWER_1), DETOUR));
+    }
 
-        assertEquals(List.of(FLOWER_1, SITE_7_TILE), route);
+    @Test
+    public void selectRouteSkipsFlowersBeyondTheDetourLimit() {
+        assertEquals(List.of(SITE_7_TILE), route(List.of(OFF_PATH_FLOWER), DETOUR));
+    }
+
+    @Test
+    public void selectRouteSkipsFlowersWhenTheLimitIsTighter() {
+        assertEquals(List.of(SITE_7_TILE), route(List.of(FLOWER_1, FLOWER_2), 1));
+    }
+
+    @Test
+    public void selectRouteDropsAPartnerBeyondTheDetourLimit() {
+        assertEquals(
+                List.of(FLOWER_1, SITE_7_TILE), route(List.of(FLOWER_1, OFF_PATH_PARTNER), DETOUR));
     }
 
     @Test
@@ -257,25 +279,22 @@ public class ShortestPathServiceTest {
             decorate(totemId);
         }
 
-        assertTrue(
-                ShortestPathService.selectRoute(
-                                SITE_8_TILE, totemService.getTotems(), List.of(FLOWER_1))
-                        .isEmpty());
+        assertTrue(route(List.of(FLOWER_1), DETOUR).isEmpty());
     }
 
     @Test
     public void updateIgnoresFlowersWhenTheEntTrailSettingIsOff() {
-        service.update(SITE_8_TILE, List.of(FLOWER_1, FLOWER_2));
+        service.update(WEST_OF_SITE_7, List.of(FLOWER_1, FLOWER_2));
 
         assertEquals(1, messages.received.size());
-        assertEquals(SITE_8_TILE, targetOfMessage(0));
+        assertEquals(SITE_7_TILE, targetOfMessage(0));
     }
 
     @Test
     public void updateSendsOneStopAtATimeThroughTheFlowers() {
         config.entTrails = true;
 
-        service.update(SITE_8_TILE, List.of(FLOWER_1, FLOWER_2));
+        service.update(WEST_OF_SITE_7, List.of(FLOWER_1, FLOWER_2));
         service.update(FLOWER_1, List.of(FLOWER_2));
         service.update(FLOWER_2, List.of());
 
@@ -286,11 +305,22 @@ public class ShortestPathServiceTest {
     }
 
     @Test
+    public void updateUsesTheConfiguredDetourLimit() {
+        config.entTrails = true;
+        config.detour = 1;
+
+        service.update(WEST_OF_SITE_7, List.of(FLOWER_1, FLOWER_2));
+
+        assertEquals(1, messages.received.size());
+        assertEquals(SITE_7_TILE, targetOfMessage(0));
+    }
+
+    @Test
     public void onGameTickSendsTheNextStopOnlyWhenTheFlowersChange() {
         config.entTrails = true;
 
-        service.onGameTick(SITE_8_TILE, List.of(FLOWER_1, FLOWER_2));
-        service.onGameTick(SITE_8_TILE, List.of(FLOWER_1, FLOWER_2));
+        service.onGameTick(WEST_OF_SITE_7, List.of(FLOWER_1, FLOWER_2));
+        service.onGameTick(WEST_OF_SITE_7, List.of(FLOWER_1, FLOWER_2));
         service.onGameTick(FLOWER_1, List.of(FLOWER_2));
         service.onGameTick(FLOWER_1, List.of(FLOWER_2));
         service.onGameTick(FLOWER_2, List.of());
@@ -303,10 +333,10 @@ public class ShortestPathServiceTest {
 
     @Test
     public void onGameTickSendsNothingForFlowerChangesWhenTheEntTrailSettingIsOff() {
-        service.onGameTick(SITE_8_TILE, List.of());
-        service.onGameTick(SITE_8_TILE, List.of(FLOWER_1, FLOWER_2));
+        service.onGameTick(WEST_OF_SITE_7, List.of());
+        service.onGameTick(WEST_OF_SITE_7, List.of(FLOWER_1, FLOWER_2));
 
         assertEquals(1, messages.received.size());
-        assertEquals(SITE_8_TILE, targetOfMessage(0));
+        assertEquals(SITE_7_TILE, targetOfMessage(0));
     }
 }

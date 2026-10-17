@@ -4,6 +4,7 @@ import com.github.therealguru.totemfletching.TotemFletchingConfig;
 import com.github.therealguru.totemfletching.model.Totem;
 import com.github.therealguru.totemfletching.model.TotemRegion;
 import com.github.therealguru.totemfletching.model.TotemSite;
+import java.awt.geom.Line2D;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -26,8 +27,9 @@ import net.runelite.client.events.PluginMessage;
  * Shows a route to the next totem that needs work through the Shortest Path plugin.
  *
  * <p>With ent trails enabled, the route first passes through the nearest pair of inactive ent trail
- * flowers. Shortest Path shows one path at a time, so the route is sent one stop at a time: the
- * next stop is sent when the current one is reached and its flower stops being inactive.
+ * flowers, as long as they lie within the detour limit of the direct line to the next totem.
+ * Shortest Path shows one path at a time, so the route is sent one stop at a time: the next stop is
+ * sent when the current one is reached and its flower stops being inactive.
  *
  * <p>Only {@link PluginMessage}s are posted, so nothing happens when Shortest Path is not
  * installed. A route is sent when the next stop changes, never every tick, and only a route sent by
@@ -73,7 +75,8 @@ public class ShortestPathService {
             return;
         }
         List<WorldPoint> flowers = config.routeViaEntTrails() ? trails : List.of();
-        List<WorldPoint> route = selectRoute(player, totemService.getTotems(), flowers);
+        List<WorldPoint> route =
+                selectRoute(player, totemService.getTotems(), flowers, config.trailDetourLimit());
         if (route.isEmpty()) {
             clear();
             return;
@@ -158,24 +161,38 @@ public class ShortestPathService {
 
     /**
      * Builds the stops in order: the nearest pair of inactive ent trail flowers, if any, then the
-     * nearest totem that is not fully decorated, measured from the last flower.
+     * nearest totem that is not fully decorated. Only flowers within {@code maxDetour} tiles of the
+     * straight line from the player to that totem are considered.
      *
      * @param player the player's current tile
      * @param totems all totems
      * @param trails the tiles of the inactive ent trail flowers
+     * @param maxDetour how far a flower may be from the line to the next totem, in tiles
      * @return the stops in order, or empty if no totem needs work
      */
     static List<WorldPoint> selectRoute(
-            final WorldPoint player, final List<Totem> totems, final List<WorldPoint> trails) {
-        List<WorldPoint> pair = selectTrailPair(player, trails);
-        WorldPoint origin = pair.isEmpty() ? player : pair.get(pair.size() - 1);
-        Optional<WorldPoint> totem = selectTarget(origin, totems);
+            final WorldPoint player,
+            final List<Totem> totems,
+            final List<WorldPoint> trails,
+            final int maxDetour) {
+        Optional<WorldPoint> totem = selectTarget(player, totems);
         if (totem.isEmpty()) {
             return List.of();
         }
-        List<WorldPoint> route = new ArrayList<>(pair);
-        route.add(totem.get());
+        WorldPoint next = totem.get();
+        List<WorldPoint> besidePath =
+                trails.stream()
+                        .filter(trail -> detourOf(trail, player, next) <= maxDetour)
+                        .collect(Collectors.toList());
+        List<WorldPoint> route = new ArrayList<>(selectTrailPair(player, besidePath));
+        route.add(next);
         return route;
+    }
+
+    private static double detourOf(
+            final WorldPoint flower, final WorldPoint from, final WorldPoint to) {
+        return Line2D.ptSegDist(
+                from.getX(), from.getY(), to.getX(), to.getY(), flower.getX(), flower.getY());
     }
 
     /**

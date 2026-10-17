@@ -41,6 +41,7 @@ Access the configuration through RuneLite's settings panel:
 - **Show Ent Trails**: Highlight the tile of Ent Trails when they are inactive/can be stepped on.
 - **Use 'Shortest Path' plugin**: Shows a route to the nearest totem that is not fully decorated. Requires the [Shortest Path](https://runelite.net/plugin-hub) plugin to be installed and enabled, and replaces any route it is currently showing.
 - **Route through ent trails**: With the Shortest Path setting on, the route first passes through the nearest pair of inactive ent trail flowers, then heads to the next totem. The route is shown one stop at a time, so the next stop appears once the current flower has been stepped on.
+- **Ent trail detour limit**: Only flowers within this many tiles (default 10) of the straight line from you to the next totem are used.
 
 ### Configuration Panel
 ![config-panel](media/config-panel.png)

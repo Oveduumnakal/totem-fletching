@@ -133,6 +133,20 @@ public interface TotemFletchingConfig extends Config {
         return false;
     }
 
+    @ConfigItem(
+            keyName = "trailDetourLimit",
+            name = "Ent trail detour limit",
+            description =
+                    "Only route through ent trails within this many tiles of the direct path to"
+                            + " the next totem",
+            section = sectionOverlays,
+            position = 11)
+    @Units(" tiles")
+    @Range(min = 1, max = 50)
+    default int trailDetourLimit() {
+        return 10;
+    }
+
     @ConfigSection(
             name = "Color Settings",
             description = "Pick colors for each overlay element",
