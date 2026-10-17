@@ -121,6 +121,18 @@ public interface TotemFletchingConfig extends Config {
         return false;
     }
 
+    @ConfigItem(
+            keyName = "routeViaEntTrails",
+            name = "Route through ent trails",
+            description =
+                    "When 'Shortest Path' is used, route through the nearest pair of inactive ent"
+                            + " trails before heading to the next totem",
+            section = sectionOverlays,
+            position = 10)
+    default boolean routeViaEntTrails() {
+        return false;
+    }
+
     @ConfigSection(
             name = "Color Settings",
             description = "Pick colors for each overlay element",

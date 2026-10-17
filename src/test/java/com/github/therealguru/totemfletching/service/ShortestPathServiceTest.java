@@ -22,6 +22,10 @@ public class ShortestPathServiceTest {
     private static final int DECORATED = 4;
     private static final WorldPoint SITE_8_TILE = TotemSite.SITE_8.getLocation();
     private static final WorldPoint OUTSIDE = new WorldPoint(3200, 3200, 0);
+    private static final WorldPoint SITE_7_TILE = TotemSite.SITE_7.getLocation();
+    private static final WorldPoint FLOWER_1 = new WorldPoint(1450, 3340, 0);
+    private static final WorldPoint FLOWER_2 = new WorldPoint(1455, 3340, 0);
+    private static final WorldPoint FAR_FLOWER = new WorldPoint(1465, 3340, 0);
 
     private final TestConfig config = new TestConfig();
     private final EventBus eventBus = new EventBus();
@@ -29,13 +33,19 @@ public class ShortestPathServiceTest {
     private TotemService totemService;
     private ShortestPathService service;
 
-    /** Config whose Shortest Path setting can be switched during a test. */
+    /** Config whose Shortest Path settings can be switched during a test. */
     public static class TestConfig implements TotemFletchingConfig {
         private boolean shortestPath = true;
+        private boolean entTrails = false;
 
         @Override
         public boolean useShortestPath() {
             return shortestPath;
+        }
+
+        @Override
+        public boolean routeViaEntTrails() {
+            return entTrails;
         }
     }
 
@@ -53,7 +63,7 @@ public class ShortestPathServiceTest {
     public void setUp() {
         eventBus.register(messages);
         totemService = new TotemService(config, null);
-        service = new ShortestPathService(eventBus, config, totemService);
+        service = new ShortestPathService(eventBus, config, totemService, new EntTrailService());
     }
 
     private void decorate(int totemId) {
@@ -180,5 +190,123 @@ public class ShortestPathServiceTest {
         assertEquals(3, messages.received.size());
         assertEquals("clear", messages.received.get(1).getName());
         assertEquals("path", messages.received.get(2).getName());
+    }
+
+    private WorldPoint targetOfMessage(int index) {
+        return (WorldPoint) messages.received.get(index).getData().get("target");
+    }
+
+    @Test
+    public void selectTrailPairIsEmptyWithoutFlowers() {
+        assertTrue(ShortestPathService.selectTrailPair(SITE_8_TILE, List.of()).isEmpty());
+    }
+
+    @Test
+    public void selectTrailPairVisitsNearestFlowerThenItsPartner() {
+        List<WorldPoint> pair =
+                ShortestPathService.selectTrailPair(SITE_8_TILE, List.of(FLOWER_2, FLOWER_1));
+
+        assertEquals(List.of(FLOWER_1, FLOWER_2), pair);
+    }
+
+    @Test
+    public void selectTrailPairIgnoresFlowersTooFarToBePartners() {
+        List<WorldPoint> pair =
+                ShortestPathService.selectTrailPair(SITE_8_TILE, List.of(FLOWER_1, FAR_FLOWER));
+
+        assertEquals(List.of(FLOWER_1), pair);
+    }
+
+    @Test
+    public void selectTrailPairTreatsFlowersOnTheSameTileAsOne() {
+        List<WorldPoint> pair =
+                ShortestPathService.selectTrailPair(SITE_8_TILE, List.of(FLOWER_1, FLOWER_1));
+
+        assertEquals(List.of(FLOWER_1), pair);
+    }
+
+    @Test
+    public void selectRouteWithoutFlowersIsJustTheNearestTotem() {
+        List<WorldPoint> route =
+                ShortestPathService.selectRoute(SITE_8_TILE, totemService.getTotems(), List.of());
+
+        assertEquals(List.of(SITE_8_TILE), route);
+    }
+
+    @Test
+    public void selectRouteEndsAtTheTotemNearestTheLastFlower() {
+        List<WorldPoint> route =
+                ShortestPathService.selectRoute(
+                        SITE_8_TILE, totemService.getTotems(), List.of(FLOWER_1, FLOWER_2));
+
+        assertEquals(List.of(FLOWER_1, FLOWER_2, SITE_7_TILE), route);
+    }
+
+    @Test
+    public void selectRouteWithALoneFlowerVisitsItThenTheTotem() {
+        List<WorldPoint> route =
+                ShortestPathService.selectRoute(
+                        SITE_8_TILE, totemService.getTotems(), List.of(FLOWER_1));
+
+        assertEquals(List.of(FLOWER_1, SITE_7_TILE), route);
+    }
+
+    @Test
+    public void selectRouteIsEmptyWhenNoTotemNeedsWorkEvenWithFlowers() {
+        for (int totemId = 1; totemId <= 8; totemId++) {
+            decorate(totemId);
+        }
+
+        assertTrue(
+                ShortestPathService.selectRoute(
+                                SITE_8_TILE, totemService.getTotems(), List.of(FLOWER_1))
+                        .isEmpty());
+    }
+
+    @Test
+    public void updateIgnoresFlowersWhenTheEntTrailSettingIsOff() {
+        service.update(SITE_8_TILE, List.of(FLOWER_1, FLOWER_2));
+
+        assertEquals(1, messages.received.size());
+        assertEquals(SITE_8_TILE, targetOfMessage(0));
+    }
+
+    @Test
+    public void updateSendsOneStopAtATimeThroughTheFlowers() {
+        config.entTrails = true;
+
+        service.update(SITE_8_TILE, List.of(FLOWER_1, FLOWER_2));
+        service.update(FLOWER_1, List.of(FLOWER_2));
+        service.update(FLOWER_2, List.of());
+
+        assertEquals(3, messages.received.size());
+        assertEquals(FLOWER_1, targetOfMessage(0));
+        assertEquals(FLOWER_2, targetOfMessage(1));
+        assertEquals(SITE_7_TILE, targetOfMessage(2));
+    }
+
+    @Test
+    public void onGameTickSendsTheNextStopOnlyWhenTheFlowersChange() {
+        config.entTrails = true;
+
+        service.onGameTick(SITE_8_TILE, List.of(FLOWER_1, FLOWER_2));
+        service.onGameTick(SITE_8_TILE, List.of(FLOWER_1, FLOWER_2));
+        service.onGameTick(FLOWER_1, List.of(FLOWER_2));
+        service.onGameTick(FLOWER_1, List.of(FLOWER_2));
+        service.onGameTick(FLOWER_2, List.of());
+
+        assertEquals(3, messages.received.size());
+        assertEquals(FLOWER_1, targetOfMessage(0));
+        assertEquals(FLOWER_2, targetOfMessage(1));
+        assertEquals(SITE_7_TILE, targetOfMessage(2));
+    }
+
+    @Test
+    public void onGameTickSendsNothingForFlowerChangesWhenTheEntTrailSettingIsOff() {
+        service.onGameTick(SITE_8_TILE, List.of());
+        service.onGameTick(SITE_8_TILE, List.of(FLOWER_1, FLOWER_2));
+
+        assertEquals(1, messages.received.size());
+        assertEquals(SITE_8_TILE, targetOfMessage(0));
     }
 }

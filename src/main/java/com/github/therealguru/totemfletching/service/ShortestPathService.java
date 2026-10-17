@@ -4,11 +4,15 @@ import com.github.therealguru.totemfletching.TotemFletchingConfig;
 import com.github.therealguru.totemfletching.model.Totem;
 import com.github.therealguru.totemfletching.model.TotemRegion;
 import com.github.therealguru.totemfletching.model.TotemSite;
+import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
+import java.util.stream.Collectors;
 import javax.inject.Inject;
 import javax.inject.Singleton;
 import lombok.RequiredArgsConstructor;
@@ -21,8 +25,12 @@ import net.runelite.client.events.PluginMessage;
 /**
  * Shows a route to the next totem that needs work through the Shortest Path plugin.
  *
+ * <p>With ent trails enabled, the route first passes through the nearest pair of inactive ent trail
+ * flowers. Shortest Path shows one path at a time, so the route is sent one stop at a time: the
+ * next stop is sent when the current one is reached and its flower stops being inactive.
+ *
  * <p>Only {@link PluginMessage}s are posted, so nothing happens when Shortest Path is not
- * installed. A route is sent when the target changes, never every tick, and only a route sent by
+ * installed. A route is sent when the next stop changes, never every tick, and only a route sent by
  * this service is cleared.
  */
 @Slf4j
@@ -34,22 +42,29 @@ public class ShortestPathService {
     private static final String PATH = "path";
     private static final String CLEAR = "clear";
     private static final int MAX_SITE_DRIFT = 3;
+    private static final int MAX_PAIR_DISTANCE = 12;
 
     private final EventBus eventBus;
     private final TotemFletchingConfig config;
     private final TotemService totemService;
+    private final EntTrailService entTrailService;
 
     private WorldPoint sentTarget;
     private boolean wasInside;
+    private Set<WorldPoint> trailSnapshot = new HashSet<>();
 
     /**
-     * Sends a route to the nearest totem that is not fully decorated, or clears the route when
-     * there is none or the player is outside Auburnvale. Does nothing if the setting is off or the
-     * target has not changed since the last route was sent.
+     * Sends a route to the next stop, or clears the route when there is none or the player is
+     * outside Auburnvale. Does nothing if the setting is off or the next stop has not changed since
+     * the last route was sent.
      *
      * @param player the player's current tile, or null if not yet known
      */
     public void update(final WorldPoint player) {
+        update(player, currentTrails());
+    }
+
+    void update(final WorldPoint player, final List<WorldPoint> trails) {
         if (!config.useShortestPath() || player == null) {
             return;
         }
@@ -57,19 +72,21 @@ public class ShortestPathService {
             clear();
             return;
         }
-        Optional<WorldPoint> target = selectTarget(player, totemService.getTotems());
-        if (target.isEmpty()) {
+        List<WorldPoint> flowers = config.routeViaEntTrails() ? trails : List.of();
+        List<WorldPoint> route = selectRoute(player, totemService.getTotems(), flowers);
+        if (route.isEmpty()) {
             clear();
             return;
         }
-        if (target.get().equals(sentTarget)) {
+        WorldPoint target = route.get(0);
+        if (target.equals(sentTarget)) {
             return;
         }
         Map<String, Object> data = new HashMap<>();
         data.put("start", player);
-        data.put("target", target.get());
+        data.put("target", target);
         eventBus.post(new PluginMessage(NAMESPACE, PATH, data));
-        sentTarget = target.get();
+        sentTarget = target;
     }
 
     /** Removes the route if this service sent one. */
@@ -85,28 +102,112 @@ public class ShortestPathService {
     public void shutDown() {
         clear();
         wasInside = false;
+        trailSnapshot = new HashSet<>();
     }
 
     /**
-     * Sends or clears the route when the player walks into or out of Auburnvale. Sends nothing
-     * while the player stays on the same side of the boundary.
+     * Sends or clears the route when the player walks into or out of Auburnvale, and sends the next
+     * stop when the set of inactive ent trails changes. Sends nothing otherwise.
      *
      * @param player the player's current tile, or null if not yet known
      */
     public void onGameTick(final WorldPoint player) {
+        onGameTick(player, currentTrails());
+    }
+
+    void onGameTick(final WorldPoint player, final List<WorldPoint> trails) {
         if (player == null) {
             return;
         }
         boolean inside = TotemRegion.isInsideAuburnvale(player);
-        if (inside == wasInside) {
+        boolean crossed = inside != wasInside;
+        wasInside = inside;
+        if (!inside) {
+            if (crossed) {
+                clear();
+            }
             return;
         }
-        wasInside = inside;
-        if (inside) {
-            update(player);
-        } else {
-            clear();
+        boolean trailsChanged = trailsChanged(trails);
+        if (crossed || trailsChanged) {
+            update(player, trails);
         }
+    }
+
+    private boolean trailsChanged(final List<WorldPoint> trails) {
+        if (!config.useShortestPath() || !config.routeViaEntTrails()) {
+            return false;
+        }
+        Set<WorldPoint> current = new HashSet<>(trails);
+        if (current.equals(trailSnapshot)) {
+            return false;
+        }
+        trailSnapshot = current;
+        return true;
+    }
+
+    private List<WorldPoint> currentTrails() {
+        if (!config.useShortestPath() || !config.routeViaEntTrails()) {
+            return List.of();
+        }
+        return entTrailService.getInactiveEntTrails().stream()
+                .map(GameObject::getWorldLocation)
+                .distinct()
+                .collect(Collectors.toList());
+    }
+
+    /**
+     * Builds the stops in order: the nearest pair of inactive ent trail flowers, if any, then the
+     * nearest totem that is not fully decorated, measured from the last flower.
+     *
+     * @param player the player's current tile
+     * @param totems all totems
+     * @param trails the tiles of the inactive ent trail flowers
+     * @return the stops in order, or empty if no totem needs work
+     */
+    static List<WorldPoint> selectRoute(
+            final WorldPoint player, final List<Totem> totems, final List<WorldPoint> trails) {
+        List<WorldPoint> pair = selectTrailPair(player, trails);
+        WorldPoint origin = pair.isEmpty() ? player : pair.get(pair.size() - 1);
+        Optional<WorldPoint> totem = selectTarget(origin, totems);
+        if (totem.isEmpty()) {
+            return List.of();
+        }
+        List<WorldPoint> route = new ArrayList<>(pair);
+        route.add(totem.get());
+        return route;
+    }
+
+    /**
+     * Picks the inactive flower nearest the player and, if one is close enough to pair with it, the
+     * flower nearest that one. A flower with no partner nearby is returned alone, which is what is
+     * left once the first flower of a pair has been stepped on.
+     *
+     * @param player the player's current tile
+     * @param trails the tiles of the inactive ent trail flowers
+     * @return zero, one or two flower tiles in the order to visit them
+     */
+    static List<WorldPoint> selectTrailPair(
+            final WorldPoint player, final List<WorldPoint> trails) {
+        Optional<WorldPoint> first = nearest(player, trails);
+        if (first.isEmpty()) {
+            return List.of();
+        }
+        List<WorldPoint> partners =
+                trails.stream()
+                        .filter(trail -> !trail.equals(first.get()))
+                        .filter(trail -> trail.distanceTo2D(first.get()) <= MAX_PAIR_DISTANCE)
+                        .collect(Collectors.toList());
+        Optional<WorldPoint> second = nearest(first.get(), partners);
+        if (second.isEmpty()) {
+            return List.of(first.get());
+        }
+        return List.of(first.get(), second.get());
+    }
+
+    private static Optional<WorldPoint> nearest(
+            final WorldPoint origin, final List<WorldPoint> points) {
+        return points.stream().min(Comparator.comparingInt(point -> point.distanceTo2D(origin)));
     }
 
     /**

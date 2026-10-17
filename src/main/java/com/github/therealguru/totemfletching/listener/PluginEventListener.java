@@ -24,6 +24,7 @@ public class PluginEventListener {
 
     private static final String CONFIG_GROUP = "totem-fletching";
     private static final String SHORTEST_PATH_KEY = "useShortestPath";
+    private static final String ENT_TRAILS_KEY = "routeViaEntTrails";
 
     private final Client client;
     private final TotemService totemService;
@@ -71,7 +72,8 @@ public class PluginEventListener {
         totemService.onConfigChange(config);
 
         if (CONFIG_GROUP.equals(configChanged.getGroup())
-                && SHORTEST_PATH_KEY.equals(configChanged.getKey())) {
+                && (SHORTEST_PATH_KEY.equals(configChanged.getKey())
+                        || ENT_TRAILS_KEY.equals(configChanged.getKey()))) {
             onShortestPathToggled();
         }
     }
