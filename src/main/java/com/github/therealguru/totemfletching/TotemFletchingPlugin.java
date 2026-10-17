@@ -2,6 +2,7 @@ package com.github.therealguru.totemfletching;
 
 import com.github.therealguru.totemfletching.listener.PluginEventListener;
 import com.github.therealguru.totemfletching.service.OverlayService;
+import com.github.therealguru.totemfletching.service.ShortestPathService;
 import com.google.inject.Provides;
 import javax.inject.Inject;
 import lombok.extern.slf4j.Slf4j;
@@ -18,6 +19,7 @@ public class TotemFletchingPlugin extends Plugin {
     @Inject private EventBus eventBus;
     @Inject private PluginEventListener pluginEventListener;
     @Inject private OverlayService overlayService;
+    @Inject private ShortestPathService shortestPathService;
 
     @Override
     protected void startUp() throws Exception {
@@ -27,6 +29,7 @@ public class TotemFletchingPlugin extends Plugin {
 
     @Override
     protected void shutDown() throws Exception {
+        shortestPathService.shutDown();
         eventBus.unregister(pluginEventListener);
         overlayService.unregisterOverlays();
     }

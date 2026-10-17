@@ -39,6 +39,7 @@ Access the configuration through RuneLite's settings panel:
 - **Show Totem Text Overlays**: Display text overlays on the totem game objects
 - **Show Points Overlay**: Display the amount of claimable points on the offerings game object
 - **Show Ent Trails**: Highlight the tile of Ent Trails when they are inactive/can be stepped on.
+- **Use 'Shortest Path' plugin**: Shows a route to the nearest totem that is not fully decorated. Requires the [Shortest Path](https://runelite.net/plugin-hub) plugin to be installed and enabled, and replaces any route it is currently showing.
 
 ### Configuration Panel
 ![config-panel](media/config-panel.png)

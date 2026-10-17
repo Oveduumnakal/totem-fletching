@@ -3,12 +3,15 @@ package com.github.therealguru.totemfletching.listener;
 import com.github.therealguru.totemfletching.TotemFletchingConfig;
 import com.github.therealguru.totemfletching.service.EntTrailService;
 import com.github.therealguru.totemfletching.service.ResearchPointService;
+import com.github.therealguru.totemfletching.service.ShortestPathService;
 import com.github.therealguru.totemfletching.service.TotemService;
 import javax.inject.Inject;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.Client;
 import net.runelite.api.GameState;
+import net.runelite.api.Player;
+import net.runelite.api.coords.WorldPoint;
 import net.runelite.api.events.*;
 import net.runelite.api.gameval.VarPlayerID;
 import net.runelite.api.gameval.VarbitID;
@@ -19,10 +22,14 @@ import net.runelite.client.events.ConfigChanged;
 @RequiredArgsConstructor(onConstructor_ = @Inject)
 public class PluginEventListener {
 
+    private static final String CONFIG_GROUP = "totem-fletching";
+    private static final String SHORTEST_PATH_KEY = "useShortestPath";
+
     private final Client client;
     private final TotemService totemService;
     private final EntTrailService entTrailService;
     private final ResearchPointService researchPointService;
+    private final ShortestPathService shortestPathService;
     private final TotemFletchingConfig config;
 
     @Subscribe
@@ -35,6 +42,7 @@ public class PluginEventListener {
             return;
 
         totemService.onVarbitChanged(varbitChanged);
+        shortestPathService.update(playerLocation());
     }
 
     @Subscribe
@@ -61,10 +69,29 @@ public class PluginEventListener {
     public void onConfigChanged(ConfigChanged configChanged) {
         log.debug("Config has reloaded {}", config.notificationDecayTotem2());
         totemService.onConfigChange(config);
+
+        if (CONFIG_GROUP.equals(configChanged.getGroup())
+                && SHORTEST_PATH_KEY.equals(configChanged.getKey())) {
+            onShortestPathToggled();
+        }
     }
 
     @Subscribe
     public void onGameTick(final GameTick gameTick) {
         totemService.updateClosestTotem(client.getLocalPlayer());
+        shortestPathService.onGameTick(playerLocation());
+    }
+
+    private void onShortestPathToggled() {
+        if (config.useShortestPath()) {
+            shortestPathService.update(playerLocation());
+        } else {
+            shortestPathService.clear();
+        }
+    }
+
+    private WorldPoint playerLocation() {
+        Player player = client.getLocalPlayer();
+        return player == null ? null : player.getWorldLocation();
     }
 }

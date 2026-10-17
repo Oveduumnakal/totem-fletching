@@ -109,6 +109,18 @@ public interface TotemFletchingConfig extends Config {
         return false;
     }
 
+    @ConfigItem(
+            keyName = "useShortestPath",
+            name = "Use 'Shortest Path' plugin",
+            description =
+                    "If you have the 'Shortest Path' plugin downloaded, it will be used to show"
+                            + " routes to the next totem that needs work",
+            section = sectionOverlays,
+            position = 9)
+    default boolean useShortestPath() {
+        return false;
+    }
+
     @ConfigSection(
             name = "Color Settings",
             description = "Pick colors for each overlay element",
