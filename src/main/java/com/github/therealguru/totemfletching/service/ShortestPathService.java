@@ -4,7 +4,6 @@ import com.github.therealguru.totemfletching.TotemFletchingConfig;
 import com.github.therealguru.totemfletching.model.Totem;
 import com.github.therealguru.totemfletching.model.TotemRegion;
 import com.github.therealguru.totemfletching.model.TotemSite;
-import java.awt.geom.Line2D;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -27,9 +26,11 @@ import net.runelite.client.events.PluginMessage;
  * Shows a route to the next totem that needs work through the Shortest Path plugin.
  *
  * <p>With ent trails enabled, the route first passes through the nearest pair of inactive ent trail
- * flowers, as long as they lie within the detour limit of the direct line to the next totem.
- * Shortest Path shows one path at a time, so the route is sent one stop at a time: the next stop is
- * sent when the current one is reached and its flower stops being inactive.
+ * flowers, as long as they lie within the detour limit of the path to the next totem. That path is
+ * asked from Shortest Path with a {@code query} message, so it is the real walking route. When
+ * Shortest Path does not answer, for example an older version, the straight line to the totem is
+ * used instead. Shortest Path shows one path at a time, so the route is sent one stop at a time:
+ * the next stop is sent when the current one is reached and its flower stops being inactive.
  *
  * <p>Only {@link PluginMessage}s are posted, so nothing happens when Shortest Path is not
  * installed. A route is sent when the next stop changes, never every tick, and only a route sent by
@@ -43,8 +44,13 @@ public class ShortestPathService {
     private static final String NAMESPACE = "shortestpath";
     private static final String PATH = "path";
     private static final String CLEAR = "clear";
+    private static final String QUERY = "query";
+    private static final String RESULT = "result";
+    private static final String QUERY_ID_PREFIX = "totem-fletching-";
     private static final int MAX_SITE_DRIFT = 3;
     private static final int MAX_PAIR_DISTANCE = 12;
+    private static final int QUERY_TIMEOUT_TICKS = 5;
+    private static final int QUERY_BACKOFF_TICKS = 100;
 
     private final EventBus eventBus;
     private final TotemFletchingConfig config;
@@ -54,11 +60,37 @@ public class ShortestPathService {
     private WorldPoint sentTarget;
     private boolean wasInside;
     private Set<WorldPoint> trailSnapshot = new HashSet<>();
+    private int tick;
+    private int queriesBlockedUntil;
+    private int lastQueryId;
+    private PendingQuery pending;
+    private WorldPoint pathTarget;
+    private List<WorldPoint> pathTiles = List.of();
+
+    /** A path query that Shortest Path has not answered yet. */
+    private static final class PendingQuery {
+        private final String id;
+        private final WorldPoint next;
+        private final List<WorldPoint> flowers;
+        private final int startedTick;
+
+        private PendingQuery(
+                final String id,
+                final WorldPoint next,
+                final List<WorldPoint> flowers,
+                final int startedTick) {
+            this.id = id;
+            this.next = next;
+            this.flowers = flowers;
+            this.startedTick = startedTick;
+        }
+    }
 
     /**
      * Sends a route to the next stop, or clears the route when there is none or the player is
-     * outside Auburnvale. Does nothing if the setting is off or the next stop has not changed since
-     * the last route was sent.
+     * outside Auburnvale. With ent trails in play the real path is asked from Shortest Path first,
+     * and the route is sent when the answer arrives. Does nothing if the setting is off or the next
+     * stop has not changed since the last route was sent.
      *
      * @param player the player's current tile, or null if not yet known
      */
@@ -74,14 +106,101 @@ public class ShortestPathService {
             clear();
             return;
         }
-        List<WorldPoint> flowers = config.routeViaEntTrails() ? trails : List.of();
-        List<WorldPoint> route =
-                selectRoute(player, totemService.getTotems(), flowers, config.trailDetourLimit());
-        if (route.isEmpty()) {
+        Optional<WorldPoint> totem = selectTarget(player, totemService.getTotems());
+        if (totem.isEmpty()) {
             clear();
             return;
         }
-        WorldPoint target = route.get(0);
+        WorldPoint next = totem.get();
+        List<WorldPoint> flowers = config.routeViaEntTrails() ? trails : List.of();
+        if (flowers.isEmpty()) {
+            pending = null;
+            send(player, next);
+            return;
+        }
+        if (isWaitingFor(next, flowers)) {
+            return;
+        }
+        List<WorldPoint> known = knownPath(player, next);
+        if (!known.isEmpty()) {
+            sendRoute(player, next, flowers, known);
+        } else if (tick < queriesBlockedUntil) {
+            sendRoute(player, next, flowers, straightLine(player, next));
+        } else {
+            askForPath(player, next, flowers);
+        }
+    }
+
+    private boolean isWaitingFor(final WorldPoint next, final List<WorldPoint> flowers) {
+        return pending != null && pending.next.equals(next) && pending.flowers.equals(flowers);
+    }
+
+    private List<WorldPoint> knownPath(final WorldPoint player, final WorldPoint next) {
+        if (!next.equals(pathTarget) || pathTiles.isEmpty()) {
+            return List.of();
+        }
+        if (distanceToTiles(player, pathTiles) > config.trailDetourLimit()) {
+            return List.of();
+        }
+        return pathTiles;
+    }
+
+    private void askForPath(
+            final WorldPoint player, final WorldPoint next, final List<WorldPoint> flowers) {
+        lastQueryId++;
+        String id = QUERY_ID_PREFIX + lastQueryId;
+        pending = new PendingQuery(id, next, flowers, tick);
+        Map<String, Object> data = new HashMap<>();
+        data.put("id", id);
+        data.put("start", player);
+        data.put("target", next);
+        eventBus.post(new PluginMessage(NAMESPACE, QUERY, data));
+    }
+
+    /**
+     * Handles the answer to a path query. The route is then built from the real path. An answer
+     * without a path falls back to the straight line. Answers to other queries are ignored.
+     *
+     * @param message any plugin message
+     * @param player the player's current tile, or null if not yet known
+     */
+    public void onPluginMessage(final PluginMessage message, final WorldPoint player) {
+        if (!NAMESPACE.equals(message.getNamespace()) || !RESULT.equals(message.getName())) {
+            return;
+        }
+        Map<String, Object> data = message.getData();
+        PendingQuery query = pending;
+        if (query == null || data == null || !query.id.equals(data.get("id"))) {
+            return;
+        }
+        pending = null;
+        if (!config.useShortestPath() || player == null) {
+            return;
+        }
+        List<WorldPoint> tiles = tilesOf(data.get("path"));
+        if (tiles.isEmpty()) {
+            log.debug(
+                    "Shortest Path found no path for query {}, using the straight line", query.id);
+            sendRoute(player, query.next, query.flowers, straightLine(player, query.next));
+            return;
+        }
+        log.debug("Using the real path of {} tiles from query {}", tiles.size(), query.id);
+        pathTarget = query.next;
+        pathTiles = tiles;
+        queriesBlockedUntil = 0;
+        sendRoute(player, query.next, query.flowers, tiles);
+    }
+
+    private void sendRoute(
+            final WorldPoint player,
+            final WorldPoint next,
+            final List<WorldPoint> flowers,
+            final List<WorldPoint> path) {
+        List<WorldPoint> route = buildRoute(player, next, flowers, config.trailDetourLimit(), path);
+        send(player, route.get(0));
+    }
+
+    private void send(final WorldPoint player, final WorldPoint target) {
         if (target.equals(sentTarget)) {
             return;
         }
@@ -92,8 +211,11 @@ public class ShortestPathService {
         sentTarget = target;
     }
 
-    /** Removes the route if this service sent one. */
+    /** Removes the route if this service sent one, and drops any query still waiting. */
     public void clear() {
+        pending = null;
+        pathTarget = null;
+        pathTiles = List.of();
         if (sentTarget == null) {
             return;
         }
@@ -106,11 +228,13 @@ public class ShortestPathService {
         clear();
         wasInside = false;
         trailSnapshot = new HashSet<>();
+        queriesBlockedUntil = 0;
     }
 
     /**
      * Sends or clears the route when the player walks into or out of Auburnvale, and sends the next
-     * stop when the set of inactive ent trails changes. Sends nothing otherwise.
+     * stop when the set of inactive ent trails changes. Also gives up on a path query that Shortest
+     * Path has not answered in time, and uses the straight line instead. Sends nothing otherwise.
      *
      * @param player the player's current tile, or null if not yet known
      */
@@ -119,9 +243,11 @@ public class ShortestPathService {
     }
 
     void onGameTick(final WorldPoint player, final List<WorldPoint> trails) {
+        tick++;
         if (player == null) {
             return;
         }
+        giveUpOnLateQuery(player);
         boolean inside = TotemRegion.isInsideAuburnvale(player);
         boolean crossed = inside != wasInside;
         wasInside = inside;
@@ -134,6 +260,20 @@ public class ShortestPathService {
         boolean trailsChanged = trailsChanged(trails);
         if (crossed || trailsChanged) {
             update(player, trails);
+        }
+    }
+
+    private void giveUpOnLateQuery(final WorldPoint player) {
+        PendingQuery query = pending;
+        if (query == null || tick - query.startedTick < QUERY_TIMEOUT_TICKS) {
+            return;
+        }
+        log.debug(
+                "Shortest Path did not answer query {} in time, using the straight line", query.id);
+        pending = null;
+        queriesBlockedUntil = tick + QUERY_BACKOFF_TICKS;
+        if (config.useShortestPath()) {
+            sendRoute(player, query.next, query.flowers, straightLine(player, query.next));
         }
     }
 
@@ -159,15 +299,27 @@ public class ShortestPathService {
                 .collect(Collectors.toList());
     }
 
+    private static List<WorldPoint> tilesOf(final Object value) {
+        List<WorldPoint> tiles = new ArrayList<>();
+        if (value instanceof List<?>) {
+            for (Object element : (List<?>) value) {
+                if (element instanceof WorldPoint) {
+                    tiles.add((WorldPoint) element);
+                }
+            }
+        }
+        return tiles;
+    }
+
     /**
-     * Builds the stops in order: the nearest pair of inactive ent trail flowers, if any, then the
-     * nearest totem that is not fully decorated. Only flowers within {@code maxDetour} tiles of the
-     * straight line from the player to that totem are considered.
+     * Builds the stops in order using the straight line to the next totem as the path: the nearest
+     * pair of inactive ent trail flowers, if any, then the nearest totem that is not fully
+     * decorated.
      *
      * @param player the player's current tile
      * @param totems all totems
      * @param trails the tiles of the inactive ent trail flowers
-     * @param maxDetour how far a flower may be from the line to the next totem, in tiles
+     * @param maxDetour how far a flower may be from the path to the next totem, in tiles
      * @return the stops in order, or empty if no totem needs work
      */
     static List<WorldPoint> selectRoute(
@@ -180,19 +332,64 @@ public class ShortestPathService {
             return List.of();
         }
         WorldPoint next = totem.get();
+        return buildRoute(player, next, trails, maxDetour, straightLine(player, next));
+    }
+
+    /**
+     * Builds the stops in order for a known next totem and path to it: the nearest pair of flowers
+     * within {@code maxDetour} tiles of the path, if any, then the totem.
+     *
+     * @param player the player's current tile
+     * @param next the tile of the next totem
+     * @param trails the tiles of the inactive ent trail flowers
+     * @param maxDetour how far a flower may be from the path, in tiles
+     * @param path the tiles of the path from the player to the next totem
+     * @return the stops in order, ending with the totem
+     */
+    static List<WorldPoint> buildRoute(
+            final WorldPoint player,
+            final WorldPoint next,
+            final List<WorldPoint> trails,
+            final int maxDetour,
+            final List<WorldPoint> path) {
         List<WorldPoint> besidePath =
                 trails.stream()
-                        .filter(trail -> detourOf(trail, player, next) <= maxDetour)
+                        .filter(trail -> distanceToTiles(trail, path) <= maxDetour)
                         .collect(Collectors.toList());
         List<WorldPoint> route = new ArrayList<>(selectTrailPair(player, besidePath));
         route.add(next);
         return route;
     }
 
-    private static double detourOf(
-            final WorldPoint flower, final WorldPoint from, final WorldPoint to) {
-        return Line2D.ptSegDist(
-                from.getX(), from.getY(), to.getX(), to.getY(), flower.getX(), flower.getY());
+    /**
+     * Lists the tiles on the straight line between two tiles, both ends included.
+     *
+     * @param from the first tile
+     * @param to the last tile
+     * @return the tiles in order
+     */
+    static List<WorldPoint> straightLine(final WorldPoint from, final WorldPoint to) {
+        int dx = to.getX() - from.getX();
+        int dy = to.getY() - from.getY();
+        int steps = Math.max(Math.abs(dx), Math.abs(dy));
+        List<WorldPoint> tiles = new ArrayList<>(steps + 1);
+        for (int step = 0; step <= steps; step++) {
+            int x = steps == 0 ? from.getX() : from.getX() + Math.round((float) dx * step / steps);
+            int y = steps == 0 ? from.getY() : from.getY() + Math.round((float) dy * step / steps);
+            tiles.add(new WorldPoint(x, y, from.getPlane()));
+        }
+        return tiles;
+    }
+
+    private static double distanceToTiles(final WorldPoint point, final List<WorldPoint> tiles) {
+        double nearest = Double.MAX_VALUE;
+        for (WorldPoint tile : tiles) {
+            nearest =
+                    Math.min(
+                            nearest,
+                            Math.hypot(point.getX() - tile.getX(), point.getY() - tile.getY()));
+        }
+        return nearest;
     }
 
     /**

@@ -7,8 +7,11 @@ import static org.junit.Assert.assertTrue;
 import com.github.therealguru.totemfletching.TotemFletchingConfig;
 import com.github.therealguru.totemfletching.model.TotemSite;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.stream.Collectors;
 import net.runelite.api.coords.WorldPoint;
 import net.runelite.client.eventbus.EventBus;
 import net.runelite.client.eventbus.Subscribe;
@@ -30,6 +33,13 @@ public class ShortestPathServiceTest {
     private static final WorldPoint OFF_PATH_PARTNER = new WorldPoint(1441, 3353, 0);
     private static final WorldPoint OFF_PATH_FLOWER = new WorldPoint(1441, 3362, 0);
     private static final int DETOUR = 10;
+    private static final List<WorldPoint> SOUTHERN_WALK =
+            List.of(
+                    WEST_OF_SITE_7,
+                    new WorldPoint(1435, 3320, 0),
+                    new WorldPoint(1445, 3310, 0),
+                    new WorldPoint(1453, 3320, 0),
+                    SITE_7_TILE);
 
     private final TestConfig config = new TestConfig();
     private final EventBus eventBus = new EventBus();
@@ -282,53 +292,186 @@ public class ShortestPathServiceTest {
         assertTrue(route(List.of(FLOWER_1), DETOUR).isEmpty());
     }
 
+    private List<PluginMessage> messagesNamed(String name) {
+        return messages.received.stream()
+                .filter(message -> name.equals(message.getName()))
+                .collect(Collectors.toList());
+    }
+
+    private WorldPoint pathTarget(int index) {
+        return (WorldPoint) messagesNamed("path").get(index).getData().get("target");
+    }
+
+    private void answer(String id, WorldPoint player, List<WorldPoint> path) {
+        Map<String, Object> data = new HashMap<>();
+        data.put("id", id);
+        data.put("path", path);
+        service.onPluginMessage(new PluginMessage("shortestpath", "result", data), player);
+    }
+
+    private void answerLatestQuery(WorldPoint player, List<WorldPoint> path) {
+        List<PluginMessage> queries = messagesNamed("query");
+        answer((String) queries.get(queries.size() - 1).getData().get("id"), player, path);
+    }
+
+    @Test
+    public void straightLineRunsFromTheFirstTileToTheLastOne() {
+        List<WorldPoint> line = ShortestPathService.straightLine(WEST_OF_SITE_7, SITE_7_TILE);
+
+        assertEquals(WEST_OF_SITE_7, line.get(0));
+        assertEquals(SITE_7_TILE, line.get(line.size() - 1));
+        assertEquals(19, line.size());
+    }
+
+    @Test
+    public void straightLineBetweenTheSameTileIsThatTile() {
+        assertEquals(
+                List.of(SITE_7_TILE), ShortestPathService.straightLine(SITE_7_TILE, SITE_7_TILE));
+    }
+
+    @Test
+    public void buildRouteUsesTheGivenPathInsteadOfTheStraightLine() {
+        List<WorldPoint> flowers = List.of(FLOWER_1, FLOWER_2);
+
+        assertEquals(
+                List.of(FLOWER_1, FLOWER_2, SITE_7_TILE),
+                ShortestPathService.selectRoute(
+                        WEST_OF_SITE_7, totemService.getTotems(), flowers, 5));
+        assertEquals(
+                List.of(SITE_7_TILE),
+                ShortestPathService.buildRoute(
+                        WEST_OF_SITE_7, SITE_7_TILE, flowers, 5, SOUTHERN_WALK));
+    }
+
     @Test
     public void updateIgnoresFlowersWhenTheEntTrailSettingIsOff() {
         service.update(WEST_OF_SITE_7, List.of(FLOWER_1, FLOWER_2));
 
-        assertEquals(1, messages.received.size());
-        assertEquals(SITE_7_TILE, targetOfMessage(0));
+        assertTrue(messagesNamed("query").isEmpty());
+        assertEquals(1, messagesNamed("path").size());
+        assertEquals(SITE_7_TILE, pathTarget(0));
+    }
+
+    @Test
+    public void updateAsksForTheRealPathBeforeSendingAnythingWhenFlowersAreNear() {
+        config.entTrails = true;
+
+        service.update(WEST_OF_SITE_7, List.of(FLOWER_1, FLOWER_2));
+
+        assertTrue(messagesNamed("path").isEmpty());
+        assertEquals(1, messagesNamed("query").size());
+        Map<String, Object> data = messagesNamed("query").get(0).getData();
+        assertEquals(WEST_OF_SITE_7, data.get("start"));
+        assertEquals(SITE_7_TILE, data.get("target"));
+    }
+
+    @Test
+    public void updateDoesNotAskTwiceWhileWaitingForTheSameAnswer() {
+        config.entTrails = true;
+
+        service.update(WEST_OF_SITE_7, List.of(FLOWER_1, FLOWER_2));
+        service.update(WEST_OF_SITE_7, List.of(FLOWER_1, FLOWER_2));
+
+        assertEquals(1, messagesNamed("query").size());
     }
 
     @Test
     public void updateSendsOneStopAtATimeThroughTheFlowers() {
         config.entTrails = true;
+        List<WorldPoint> walk = ShortestPathService.straightLine(WEST_OF_SITE_7, SITE_7_TILE);
 
         service.update(WEST_OF_SITE_7, List.of(FLOWER_1, FLOWER_2));
+        answerLatestQuery(WEST_OF_SITE_7, walk);
         service.update(FLOWER_1, List.of(FLOWER_2));
         service.update(FLOWER_2, List.of());
 
-        assertEquals(3, messages.received.size());
-        assertEquals(FLOWER_1, targetOfMessage(0));
-        assertEquals(FLOWER_2, targetOfMessage(1));
-        assertEquals(SITE_7_TILE, targetOfMessage(2));
+        assertEquals(1, messagesNamed("query").size());
+        assertEquals(3, messagesNamed("path").size());
+        assertEquals(FLOWER_1, pathTarget(0));
+        assertEquals(FLOWER_2, pathTarget(1));
+        assertEquals(SITE_7_TILE, pathTarget(2));
     }
 
     @Test
     public void updateUsesTheConfiguredDetourLimit() {
         config.entTrails = true;
         config.detour = 1;
+        List<WorldPoint> walk = ShortestPathService.straightLine(WEST_OF_SITE_7, SITE_7_TILE);
 
         service.update(WEST_OF_SITE_7, List.of(FLOWER_1, FLOWER_2));
+        answerLatestQuery(WEST_OF_SITE_7, walk);
 
-        assertEquals(1, messages.received.size());
-        assertEquals(SITE_7_TILE, targetOfMessage(0));
+        assertEquals(1, messagesNamed("path").size());
+        assertEquals(SITE_7_TILE, pathTarget(0));
+    }
+
+    @Test
+    public void flowersAreJudgedAgainstTheRealPathNotTheStraightLine() {
+        config.entTrails = true;
+        config.detour = 5;
+
+        service.update(WEST_OF_SITE_7, List.of(FLOWER_1, FLOWER_2));
+        answerLatestQuery(WEST_OF_SITE_7, SOUTHERN_WALK);
+
+        assertEquals(1, messagesNamed("path").size());
+        assertEquals(SITE_7_TILE, pathTarget(0));
+    }
+
+    @Test
+    public void resultsForOtherQueriesAreIgnored() {
+        config.entTrails = true;
+        List<WorldPoint> walk = ShortestPathService.straightLine(WEST_OF_SITE_7, SITE_7_TILE);
+
+        service.update(WEST_OF_SITE_7, List.of(FLOWER_1, FLOWER_2));
+        answer("someone-else", WEST_OF_SITE_7, walk);
+
+        assertTrue(messagesNamed("path").isEmpty());
+    }
+
+    @Test
+    public void anAnswerWithoutAPathFallsBackToTheStraightLine() {
+        config.entTrails = true;
+
+        service.update(WEST_OF_SITE_7, List.of(FLOWER_1, FLOWER_2));
+        answerLatestQuery(WEST_OF_SITE_7, List.of());
+
+        assertEquals(1, messagesNamed("path").size());
+        assertEquals(FLOWER_1, pathTarget(0));
+    }
+
+    @Test
+    public void aQueryThatIsNeverAnsweredFallsBackAndIsNotRepeatedForAWhile() {
+        config.entTrails = true;
+
+        service.update(WEST_OF_SITE_7, List.of(FLOWER_1, FLOWER_2));
+        for (int tick = 0; tick < 5; tick++) {
+            service.onGameTick(WEST_OF_SITE_7, List.of(FLOWER_1, FLOWER_2));
+        }
+        service.update(WEST_OF_SITE_7, List.of(FLOWER_2));
+
+        assertEquals(1, messagesNamed("query").size());
+        assertEquals(2, messagesNamed("path").size());
+        assertEquals(FLOWER_1, pathTarget(0));
+        assertEquals(FLOWER_2, pathTarget(1));
     }
 
     @Test
     public void onGameTickSendsTheNextStopOnlyWhenTheFlowersChange() {
         config.entTrails = true;
+        List<WorldPoint> walk = ShortestPathService.straightLine(WEST_OF_SITE_7, SITE_7_TILE);
 
         service.onGameTick(WEST_OF_SITE_7, List.of(FLOWER_1, FLOWER_2));
+        answerLatestQuery(WEST_OF_SITE_7, walk);
         service.onGameTick(WEST_OF_SITE_7, List.of(FLOWER_1, FLOWER_2));
         service.onGameTick(FLOWER_1, List.of(FLOWER_2));
         service.onGameTick(FLOWER_1, List.of(FLOWER_2));
         service.onGameTick(FLOWER_2, List.of());
 
-        assertEquals(3, messages.received.size());
-        assertEquals(FLOWER_1, targetOfMessage(0));
-        assertEquals(FLOWER_2, targetOfMessage(1));
-        assertEquals(SITE_7_TILE, targetOfMessage(2));
+        assertEquals(1, messagesNamed("query").size());
+        assertEquals(3, messagesNamed("path").size());
+        assertEquals(FLOWER_1, pathTarget(0));
+        assertEquals(FLOWER_2, pathTarget(1));
+        assertEquals(SITE_7_TILE, pathTarget(2));
     }
 
     @Test
@@ -336,7 +479,8 @@ public class ShortestPathServiceTest {
         service.onGameTick(WEST_OF_SITE_7, List.of());
         service.onGameTick(WEST_OF_SITE_7, List.of(FLOWER_1, FLOWER_2));
 
-        assertEquals(1, messages.received.size());
-        assertEquals(SITE_7_TILE, targetOfMessage(0));
+        assertTrue(messagesNamed("query").isEmpty());
+        assertEquals(1, messagesNamed("path").size());
+        assertEquals(SITE_7_TILE, pathTarget(0));
     }
 }

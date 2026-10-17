@@ -17,6 +17,7 @@ import net.runelite.api.gameval.VarPlayerID;
 import net.runelite.api.gameval.VarbitID;
 import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.events.ConfigChanged;
+import net.runelite.client.events.PluginMessage;
 
 @Slf4j
 @RequiredArgsConstructor(onConstructor_ = @Inject)
@@ -82,6 +83,11 @@ public class PluginEventListener {
     public void onGameTick(final GameTick gameTick) {
         totemService.updateClosestTotem(client.getLocalPlayer());
         shortestPathService.onGameTick(playerLocation());
+    }
+
+    @Subscribe
+    public void onPluginMessage(final PluginMessage pluginMessage) {
+        shortestPathService.onPluginMessage(pluginMessage, playerLocation());
     }
 
     private void onShortestPathToggled() {
